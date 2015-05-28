@@ -1,0 +1,5 @@
+In this experiment first a job with 300 tasks was submitted along with a job with 100 tasks  and a snap was taken at the end of the job with 100 tasks. When the 300 task job was still running and the 100 task job had completed another job with 200 tasks was started thus showing parallel job submission (this is depicted clearly in (100with300part1.png)). At the end of of the 300 task and 200 task job completion another screenshot was taken which shows parallel job submission and completion (200with300part2.png) 
+
+
+Jobadding100with200.png
+Also shown is a case where a job with 200 tasks is started and at the completion of its 100 tasks another job is started that has 100 tasks. Thus each job gets 2 wokers at a time. This can be easily seen from the execution time of each job. Job with 200 tasks completes in roughly 75 sseconds ((100/4workers =)25 + (100/2 workers=)50 =75 seconds) and the job with 100 tasks completes roughly in 50 seconds

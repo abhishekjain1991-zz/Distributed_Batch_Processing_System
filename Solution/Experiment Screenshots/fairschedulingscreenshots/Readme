@@ -1,0 +1,1 @@
+If it were FIFO, each Job would complete in (Number of Tasks*1second(as each task takes 1 second))/4(as there are 4 workers). However it is only due to fair scheduling that nearly all jobs complete at the same instant with execution time = Number of Tasks*1seconds.  This is shown by all figures in the folder.

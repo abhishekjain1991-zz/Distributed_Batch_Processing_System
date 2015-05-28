@@ -1,0 +1,487 @@
+//*****************************************************************************************************************************************************************************
+//ECE 6101 Distributed Batch Processing System
+//Option 1
+//Abhishek Jain		ajain333@gatech.edu 	902985939
+//Akar Shah 		akar.j.shah@gatech.edu 	902914684
+//*****************************************************************************************************************************************************************************
+
+package scheduler;
+
+import java.io.*;
+import java.net.*;
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.Hashtable;
+import java.util.List;
+import java.util.Collections;
+import java.util.Map;
+import common.*;
+
+//Threads are created for:
+//1) The Scheduler
+//2) Each Worker
+//3) The Connection Manager
+
+// Client submits request to scheduler for job servicing.
+//Scheduler informs workers of incoming tasks and assigns tasks to free workers using fair scheduling.
+//Then each worker informs the proper client on completing the job and once all tasks of a particular job complete,
+//the worker working on the last task of a particular job informs the client (of that job) that all tasks have completed and signals the client to close the connection. 
+
+public class Scheduler {
+
+	int schedulerPort;
+	Cluster cluster;
+	int jobIdNext;
+	ArrayList <WorkerNode> wn=new ArrayList<WorkerNode>();	//contains the number of free workers at any point of time
+	ArrayList <Socket> sockets=new ArrayList<Socket>();		
+	Socket workersock, clientsock=null;
+	  
+	Map<Integer,job> jobtable = Collections.synchronizedMap(new Hashtable<Integer,job>());	//contains the list of Jobs at any point of time and is accessed using the Job ID as key
+	List<TaskTableElement>TaskTable=Collections.synchronizedList(new ArrayList<TaskTableElement>());	//contains the list of Tasks from different Jobs at any point of time 
+	jobmanagement jb=new jobmanagement();
+	boolean last_one=true;
+	int globaltaskid=1;	//used for proper allocation of tasks to different workers
+
+	Scheduler(int p) {
+		schedulerPort = p;
+	    cluster = new Cluster();
+	    jobIdNext = 1;
+	}
+
+	public static void main(String[] args) {
+		Scheduler scheduler = new Scheduler(Integer.parseInt(args[0]));
+	    scheduler.run();	//Scheduler starts
+	}
+
+	public void run() {
+		try 
+		{
+			//Create a ServerSocket listening at specified port
+			ServerSocket serverSocket = new ServerSocket(schedulerPort);
+			new Thread(new connectionManager(serverSocket)).start();	//Connection Manager is started and runs parallely with the main thread 9scheduler)
+	    
+			while(true)	//Fair Scheduling
+			{
+				while(cluster.freeWorkers.size()!=0)
+					{
+						wn.add( cluster.getFreeWorkerNode());
+					}
+		  
+					if(TaskTable.size()!=0)
+						{
+							if(TaskTable.size()>=wn.size()) //Number of tasks exceeding the number of free workers
+								{
+									int i=0;
+									int index=0;
+									while(wn.size()!=0)
+										{
+											boolean found=false;
+											for(int k=0;k<TaskTable.size();k++)
+												{	
+													if(globaltaskid==TaskTable.get(k).jid)
+														{	  
+															found=true;
+															globaltaskid++;	//incrementing so as to get a task of a different job ensuring fairness
+															index=k;
+															break;
+														}
+												}
+											if(!found)
+											{
+												for(int k=0;k<TaskTable.size();k++)
+												{
+													if(globaltaskid<TaskTable.get(k).jid)
+													{
+														found=true;
+														globaltaskid=TaskTable.get(k).jid;	//incrementing so as to get a task of a different job ensuring fairness
+														globaltaskid++;
+														index=k;
+														break;
+													}
+												}
+											}
+										
+											if(!found)	//selecting the first task in the task table as there is no new job assigned
+												{	 
+													globaltaskid=TaskTable.get(0).jid;
+													globaltaskid++;
+													index=0;
+												}
+										
+											new Thread(new work(jobtable.get(TaskTable.get(index).jid),TaskTable.get(index).tid,wn.get(0))).start();
+											jb.modify(index, 0,0,false);	//deleting the task that has been assigned to a worker from the task list
+											wn.remove(0);	//removing a worker from the list of free workers
+										}
+								}
+								
+							else if(TaskTable.size()<wn.size())	//Number of tasks less than the number of free workers
+								{
+									int i=0;
+									while(TaskTable.size()!=0)
+										{
+											new Thread(new work(jobtable.get(TaskTable.get(0).jid),TaskTable.get(0).tid,wn.get(0))).start();
+											wn.remove(0);	//removing a worker from the list of free workers
+											jb.modify(0, 0,0,false);	//deleting the task that has been assigned to a worker from the task list
+										}
+								}
+						}	 
+	        }
+	    }
+		
+		catch(Exception e)
+		{
+			//e.printStackTrace();
+	    }
+	}	//End of run block
+	  
+	//Data structure for a cluster of worker nodes
+	class Cluster 
+	{
+		ArrayList<WorkerNode> workers;	//all the workers
+	    LinkedList<WorkerNode> freeWorkers;	//the free workers
+	    
+	    Cluster() {
+			workers = new ArrayList<WorkerNode>();
+			freeWorkers = new LinkedList<WorkerNode>();
+	    }
+
+	    WorkerNode createWorkerNode(String addr, int port) 
+			{
+				WorkerNode n = null;
+				
+				synchronized(workers) 
+					{
+						n = new WorkerNode(workers.size(), addr, port);
+						workers.add(n);
+					}	
+	    
+				addFreeWorkerNode(n);
+				return n;
+			}
+
+	    WorkerNode getFreeWorkerNode() 
+			{
+				WorkerNode n = null;
+
+				try
+					{
+						synchronized(freeWorkers)
+							{
+								while(freeWorkers.size() == 0) 
+									{
+										freeWorkers.wait();
+									}
+								n = freeWorkers.remove();
+							}
+						n.status = 2;
+					} 
+				
+				catch(Exception e)
+					{
+						//e.printStackTrace();
+					}
+
+				return n;
+			}
+
+	    void addFreeWorkerNode(WorkerNode n)
+			{
+				n.status = 1;
+				synchronized(freeWorkers)
+					{
+						freeWorkers.add(n);
+						freeWorkers.notifyAll();	//Notifying the threads waiting for a free worker that a free worker has been added in the free worker list
+					}
+			}
+	}	
+
+	//Data structure of a worker node
+	class WorkerNode 
+	{
+	    int id;
+	    String addr;
+	    int port;
+	    int status; //WorkerNode status: 0-sleep, 1-free, 2-busy, 4-failed
+
+	    WorkerNode(int i, String a, int p)
+			{
+				id = i;
+				addr = a;
+				port = p;
+				status = 0;
+			}
+	}
+
+	class work implements Runnable
+	{
+		Socket clientsock;
+		Socket Workersock;
+		int jobId;
+		String className;
+		int Taskid;
+		int numtasks;
+		WorkerNode work;
+		job j;
+		
+		work(job c, int tid, WorkerNode n)
+			{
+				clientsock=c.clientsock;
+				work=n;
+				jobId=c.jobId;
+				Taskid=tid;
+				numtasks=c.actualnumtasks;
+				className=c.classname;
+				j=c;
+			}
+		
+		@Override
+		public void run() 
+		{
+			//thread to assign tasks to the workers and establish communication between the worker and the client
+			//worker stream set-up
+			//here worker is directly connected to client
+			try
+			{
+				Workersock = new Socket(work.addr,work.port);	//starting a connection with the worker
+				DataInputStream wis = new DataInputStream(Workersock.getInputStream());
+				DataOutputStream wos = new DataOutputStream(Workersock.getOutputStream());
+
+
+				//assigning task to worker 
+				wos.writeInt(Opcode.new_tasks);
+				wos.writeInt(jobId);
+				wos.writeUTF(className);
+				wos.writeInt(Taskid);
+				wos.writeInt(1);
+				wos.flush();
+
+				//client stream set-up establishing connection between worker and client
+				DataInputStream dis = new DataInputStream(clientsock.getInputStream());
+				DataOutputStream dos = new DataOutputStream(clientsock.getOutputStream());
+	
+	        
+				synchronized (clientsock)
+					{
+						if(j.actualtasks==0)
+							{
+								dos.writeInt(Opcode.job_start);	//indication of first task of a job
+								dos.flush();
+							}
+
+						while(wis.readInt() == Opcode.task_finish)	//waiting for the worker to finish the task assigned
+							{
+								dos.writeInt(Opcode.job_print);
+								dos.writeUTF("task "+wis.readInt()+" finished on worker "+work.id);
+								dos.flush();
+							}
+				
+						cluster.addFreeWorkerNode(work);
+						int myq=j.actualtasks();	//indication of the actual task number being executed by the worker
+						
+						if(myq==numtasks)	//indication of last task of a job
+							{
+								dos.writeInt(Opcode.job_finish);	//telling the client to close the connection as all the jobs have finished
+								dos.flush();
+							}
+					}
+					
+				//closing the connection between worker and client
+				wis.close();
+				wos.close();
+				Workersock.close();	
+			}
+		
+			catch(Exception e)
+				{
+					synchronized(TaskTable)
+						{	  
+							jb.modify(0, jobId,Taskid,true);
+						}
+				}
+		}
+	}
+
+	class job
+	{
+		int jobId;
+		int actualnumtasks;
+		String classname;
+		Socket clientsock;
+		int remainingnumtasks;
+		int runningtasks;
+		int actualtasks;
+		
+		job(int jid, int ntasks, String cname, Socket csocket)
+			{
+				jobId=jid;
+				actualnumtasks=ntasks;
+				classname=cname;;
+				clientsock=csocket;  
+				remainingnumtasks=actualnumtasks;
+				runningtasks=actualnumtasks;
+				actualtasks=0;
+			}
+			
+		public synchronized int remainingtasks()
+			{	  
+				int temp=remainingnumtasks;
+				remainingnumtasks--;
+				return temp;
+			}
+			
+		public synchronized int runningtasksremaining()
+			{	  
+				return runningtasks--;
+			}
+	  
+		public synchronized int actualtasks()	//keeping a track of the number of tasks of a particular job that have been completed
+			{	 
+				int temp=actualtasks;
+				actualtasks++;
+				return temp;
+			}	
+		
+		public synchronized int remainingtasksinc()
+			{	  
+				int temp=++remainingnumtasks;
+				return temp;
+			}
+	}
+
+	class jobmanagement
+	{
+		jobmanagement(){
+		}
+		
+		public synchronized void modify(int i, int j,int k, boolean flag)
+			{
+				synchronized(TaskTable)
+					{
+						if(i==0 && j!=0 && k!=0 && !flag)
+							{
+								for(int l=0;l<k;l++)
+									{
+										TaskTable.add(new TaskTableElement(j,l));
+									}
+							}
+							
+						else if(i==0 && j!=0 && flag)	//Node Failure (Worker Killed) 
+							{
+								TaskTable.add((new TaskTableElement(j,k)));	//Move task to top of the table
+							}
+		
+						else if( j==0 && k==0 && !flag)
+								TaskTable.remove(i);
+			
+					}
+			}		
+	}		
+
+	//Implement non-blocking request handling and worker registration
+	class connectionManager implements Runnable
+	{
+		ServerSocket ssocket;
+		connectionManager(ServerSocket s)
+			{
+				ssocket=s;
+			}
+	
+		@Override
+		public void run() 
+		{
+			try
+			{
+				while(true)
+					{
+						//accept connection from worker or client
+						Socket socket = ssocket.accept();
+						DataInputStream dis = new DataInputStream(socket.getInputStream());
+						DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
+						int code = dis.readInt();
+
+						//a connection from worker reporting itself
+						if(code == Opcode.new_worker)
+							{
+								//include the worker into the cluster
+								workersock=socket;
+								WorkerNode n = cluster.createWorkerNode( dis.readUTF(), dis.readInt());
+								
+								if(n == null)
+									{
+										dos.writeInt(Opcode.error);
+									}
+	         
+								else
+									{
+										dos.writeInt(Opcode.success);
+										dos.writeInt(n.id);
+										System.out.println("Worker "+n.id+" "+n.addr+" "+n.port+" created");
+									}
+								
+								dos.flush();
+							}
+
+						//a connection from client submitting a job
+						if(code == Opcode.new_job)
+							{
+								clientsock=socket;
+								String className = dis.readUTF();
+								long len = dis.readLong();
+
+								//send out the Job Id
+								int jobId = jobIdNext++;
+								dos.writeInt(jobId);
+								dos.flush();
+
+								//receive the job file and store it into the shared file-system
+								String fileName = new String("fs/."+jobId+".jar");
+								FileOutputStream fos = new FileOutputStream(fileName);
+								int count;
+								byte[] buf = new byte[65536];
+								
+								while(len > 0)
+									{
+										count = dis.read(buf);
+										if(count > 0)
+											{
+												fos.write(buf, 0, count);
+												len -= count;
+											}
+									}
+	          
+								fos.flush();
+								fos.close();
+	          
+
+								//get the tasks
+								int taskIdStart = 0;
+								int numTasks = JobFactory.getJob(fileName, className).getNumTasks();
+								
+								//Populating the task table according to Job IDs
+								synchronized(TaskTable) 
+									{
+										jb.modify(0, jobId,numTasks,false);
+										jobtable.put(jobId, new job(jobId,numTasks-1,className,clientsock));
+									}	
+							}
+					}
+			}
+			
+			catch(Exception e)
+				{
+					//e.printStackTrace();
+				}
+		}
+	}
+	
+	class TaskTableElement
+	{
+		public int jid,tid;
+		TaskTableElement(int a, int b)
+			{
+				jid=a;	//Job ID
+				tid=b;	//Task ID
+			}
+	}
+}
+//****************************************************************************************************************************************************************************
